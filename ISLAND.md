@@ -17,6 +17,45 @@
 
 ## 1. 关键类
 
+### 常驻通知文字滚动
+
+`MarqueeHook` 对常驻通知默认仍不启用全局跑马灯。渠道明确选择 `marquee=on` 时，
+允许长文字滚动，但 `IslandMarqueePolicy` 不创建按滚动次数自动隐藏的会话，
+不覆盖原生岛超时。通知元数据缺失时同样不能授权自动隐藏，避免一次读取失败
+把常驻通知当成普通通知移除。普通通知仍遵从原有自动隐藏设置。
+原生 `updateBigIslandView` 是挂起函数，恢复调用的通知参数为 null；已核对的
+`DynamicIslandContentView$updateBigIslandView$1` 在 label 高位标记恢复、低位为 1 时，
+实际数据保存在 `L$1`。`MarqueeUpdateData` 在原生调用前读取该数据，校验 `this$0`、
+`L$0` 和当前通知身份，调用后再次校验，避免普通通知被误判为未知状态而停用滚动。
+不缓存协程或视图；旧通知恢复、字段不匹配时只执行原生调用，真实 null 更新不借用旧通知。
+滚动继续复用原有弱引用控制器和 detach 清理，不增加线程或定时轮询。
+原生换字/真假岛交接期间，第一帧的 Layout 或可见矩形可能尚未可用，不能据此永久 stop。
+暂不可滚动时撤下帧回调，等待 OnPreDraw 检查布局；就绪后仅恢复一个帧回调。
+等待期间不主动制造帧、不计入自动隐藏会话的滚动数；配置关闭、通知替换和 detach
+均移除等待监听，迟到的绘制事件不能复活已停止的控制器。
+视图仍 attached 但自身、任意祖先或窗口不可见时也暂停帧回调（包括 alpha 为零）；
+通过同一个 OnPreDraw 等待可见后恢复，不改变原有速度、停顿及滚动边界。
+起点 1500ms、末尾严格超过 1000ms 的停顿使用一次延迟帧，不在停顿期逐帧轮询。
+按单调时钟的绝对截止时间扣除主线程迟到，避免停顿额外延长；被动 preDraw 仍可感知
+原生隐藏或布局变化，不主动制造帧。停止、通知替换、配置关闭和 detach 均取消延迟帧；
+移除监听时使用注册时弱持有的 ViewTreeObserver，避免树更换后的遗留监听。
+渠道宽度由 ConfigManager 按明确包名与渠道名读取，不依赖通知白名单；
+应用 JSON 存在时以其内容为准，缺失字段继承应用宽度，不回读遗留独立键。
+插件的 `miuix.colorful.texteffect.TimerTextEffectView` 由 replacement span 绘制完整文字，
+普通 Layout 行边界不能代表其实际字形范围。对该确切控件复用启动时 Paint 测得的完整文字宽度，
+按原 gravity 在 Layout 内定位；不逐帧测量或重新设置文字。固定宽度的特效 span 使用零宽占位符，
+LTR 右对齐的实际绘制起点为 `max(0, layoutWidth - textWidth)`。原生更新后控件可能从完整文字宽度
+收窄到可见区宽度，不能沿用负的假定字形起点，否则文字会从过于靠右的位置开始且末尾不可达。
+居中与 RTL 继续使用各自原生对齐分支。其他 TextView 保留 Layout 行边界。
+`IslandRightTextViewHolder` 会通过 `titleScaleX` 和 `titleTransX` 缩放、平移文字；布局 left/right
+不能直接当成绘制边界。沿文字到内容岛的祖先链复合 `scaleX / pivotX / translationX`，
+再将每层裁剪区逆变换到文字局部坐标。内容岛自身及外层窗口动画不纳入计算。
+缩放后整行放得下时撤下帧回调并归零旧 scrollX；等待真实布局变化后重新判断。
+原生 `island_text_shade` 是叠加的渐隐层；仅在文字容器相邻两层查找并弱引用，
+以渐隐边缘加 1 dp 为完整避让边界，只采用其相对原可见区的位移增量的一半，
+让终点离开遮罩较深的一侧，避免完整避让带来过大留白。隐藏遮罩时不保留额外留白；
+不修改原生遮罩、控件尺寸或通知配置。
+
 宽度反射方法在 Hook 注册时解析并复用，不缓存 View、通知数据或长期宽度结果。
 一次 calculateBigIslandWidth 的嵌套 getter 仅在内容身份相同时复用本轮宽度，owner 弱引用，
 finally 恢复外层/移除 ThreadLocal；不同内容和每次新计算均重新读配置。固定字段表在
@@ -279,6 +318,8 @@ fakeExpandedView.addView(dynamicIslandData.fakeView)
 每个 fake 子 View 保存自己的系统原始 background。对应类型启用模糊时，`IslandBlurHook.applyTransitionBlur()` 在该子 View 上创建独立的 `BackgroundBlurDrawable`；关闭模糊或 View detach 时恢复原 background 并释放模糊资源。自定义图片由 `IslandBackgroundHook.createTransitionBackground()` 创建独立 Drawable 实例，避免多个 View 共享 bounds。
 
 ## 5. fake 层几何和圆角
+
+跑马灯不能仅按“文字宽度减父容器宽度”从 scrollX=0 向左滚。右侧 END 对齐的超宽 TextView 会有负 left，系统已经裁掉其左部。滚动范围使用 Layout 实际行边界与父容器布局裁剪区域的坐标差，允许负起点，末端对齐右边界；RTL 反向。逐层累加 child.left-parent.scrollX，按 clipChildren/clipToPadding 相交，在内容岛处停止，避免外部真假岛缩放/裁剪污染文字的逻辑坐标。实机 getLocalVisibleRect 在换字后持续返回与超宽文字坐标不一致的区域，不能作为滚动存活条件。控制器复用数值范围与 viewport 对象，每帧不创建这些对象，不改变原有 gravity 或容器边距。
 
 ### 按应用与渠道限制大岛宽度
 

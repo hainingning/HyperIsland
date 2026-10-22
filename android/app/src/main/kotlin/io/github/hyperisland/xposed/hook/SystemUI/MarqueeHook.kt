@@ -3,8 +3,10 @@ package io.github.hyperisland.xposed.hook
 import android.service.notification.StatusBarNotification
 import android.os.SystemClock
 import android.view.Choreographer
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.TextView
 import io.github.hyperisland.xposed.ConfigManager
 import io.github.hyperisland.xposed.log
@@ -16,6 +18,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import java.util.WeakHashMap
 import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 
 /**
  * Hook SystemUI 中超级岛大岛视图的 TextView，实现自定义跑马灯（文字横向滚动）效果。
@@ -171,7 +174,7 @@ object MarqueeHook : BaseHook() {
             val speed = getMarqueeSpeed()
             val controller = scrollerMap.getOrPut(textView) { MarqueeController(textView, speed) }
             controller.speedPxPerSec = speed
-            controller.start()
+            controller.start(measuredW)
         } else {
             stopMarquee(textView)
         }
@@ -507,25 +510,31 @@ object MarqueeHook : BaseHook() {
                 val updateMethod = clazz.declaredMethods.firstOrNull { it.name == "updateBigIslandView" }
                 if (updateMethod != null) {
                     module.hook(updateMethod).intercept { chain ->
-                        val islandView = chain.thisObject as? ViewGroup
+                        val islandView = chain.thisObject as? ViewGroup ?: return@intercept chain.proceed()
+                        // A suspended native update re-enters with a null data argument.
+                        // Recover only its own still-current continuation before proceed
+                        // consumes the resume label. Stale resumes must not stop a new island.
+                        val updateData = MarqueeUpdateData.resolve(
+                            islandView, chain.args.getOrNull(0), chain.args.lastOrNull(),
+                        )
+                        if (!updateData.shouldApply) return@intercept chain.proceed()
                         val updateToken = Any()
-                        if (islandView != null) {
-                            islandUpdateTokens[islandView] = updateToken
-                            resetIslandMarqueeState(islandView)
-                            targetIslandKey[islandView]?.let(ActiveIslandDismissHook::invalidate)
-                        }
+                        islandUpdateTokens[islandView] = updateToken
+                        resetIslandMarqueeState(islandView)
+                        targetIslandKey[islandView]?.let(ActiveIslandDismissHook::invalidate)
                         val result = chain.proceed()
                         try {
-                            if (islandView == null) return@intercept result
-                            if (islandUpdateTokens[islandView] !== updateToken) {
+                            if (islandUpdateTokens[islandView] !== updateToken ||
+                                !updateData.canApplyAfter(islandView)
+                            ) {
                                 trace { "ignore stale island update island=${System.identityHashCode(islandView)}" }
                                 return@intercept result
                             }
-                            val islandData = chain.args.getOrNull(0)
+                            val islandData = updateData.islandData
                             var pkgName = ""
                             var channelId = ""
                             var islandKey = ""
-                            var isOngoing = false
+                            var isOngoing: Boolean? = null
                             try {
                                 if (islandData != null) {
                                     islandKey = islandData.javaClass.getMethod("getKey")
@@ -538,6 +547,7 @@ object MarqueeHook : BaseHook() {
                                         @Suppress("DEPRECATION")
                                         extras?.getParcelable("miui.sbn") as? StatusBarNotification
                                     }
+                                    isOngoing = sbn?.isOngoing
                                     pkgName = sbn?.packageName ?: ""
                                     channelId = sbn?.notification?.channelId ?: ""
                                     val sourcePkg = sbn?.notification?.extras
@@ -563,8 +573,7 @@ object MarqueeHook : BaseHook() {
                                             channelId = recent.second
                                         }
                                     }
-                                     isOngoing = (sbn?.notification?.flags ?: 0) and android.app.Notification.FLAG_ONGOING_EVENT != 0
-                                     if (sbn != null) targetNotifications[islandView] = sbn
+                                    if (sbn != null) targetNotifications[islandView] = sbn
                                     targetPkg[islandView] = pkgName
                                     targetChannel[islandView] = channelId
                                     if (islandKey.isNotEmpty()) {
@@ -656,12 +665,12 @@ object MarqueeHook : BaseHook() {
                                 }
                                 effectiveAutoHide
                             }
-                            val autoHideLoops = effectiveAutoHide
-                                .removeSuffix("_override")
-                                .toIntOrNull()
-                                ?.coerceIn(1, 2)
-                                ?: 0
-                            val overrideTimeout = effectiveAutoHide.endsWith("_override")
+                            val policy = IslandMarqueePolicy.resolve(
+                                enabled = enabled,
+                                explicitlyEnabled = marqueeRaw == "on",
+                                ongoing = isOngoing,
+                                autoHide = effectiveAutoHide,
+                            )
                             val originalTimeoutSecs = if (isToastSource) {
                                 val rawTimeout = ConfigManager.getString(
                                     "pref_toast_timeout_$pkgName",
@@ -686,7 +695,7 @@ object MarqueeHook : BaseHook() {
                                 }
                             }
                             
-                            if (!enabled || isOngoing) {
+                            if (!policy.enabled) {
                                 traverseAndApplyMarquee(islandView, false)
                                 return@intercept result
                             }
@@ -695,8 +704,8 @@ object MarqueeHook : BaseHook() {
                             traverseAndApplyMarquee(
                                 islandView,
                                 true,
-                                autoHideLoops,
-                                overrideTimeout,
+                                policy.autoHideLoops,
+                                policy.overrideTimeout,
                                 originalTimeoutSecs,
                             )
                         } catch (e: Exception) {
@@ -720,13 +729,20 @@ object MarqueeHook : BaseHook() {
         view: TextView,
         var speedPxPerSec: Int = 100,
         private val delayMs: Int = 1500
-    ) : Choreographer.FrameCallback {
+    ) : Choreographer.FrameCallback, ViewTreeObserver.OnPreDrawListener {
 
         private companion object {
             const val PAUSE_AT_END_MS = 1000
         }
 
         private var currentScrollX = 0f
+        private var distanceScrolled = 0f
+        private val scrollRange = MarqueeScrollRange()
+        private val viewport = MarqueeViewport()
+        private val readiness = MarqueeReadiness()
+        private val usesTimerTextEffect = view.javaClass.name == "miuix.colorful.texteffect.TimerTextEffectView"
+        private var edgeShadeRef: WeakReference<View>? = null
+        private var measuredTextWidth = 0f
         private var isRunning = false
         private var startTimeNanos = 0L
         private var lastFrameTimeNanos = 0L
@@ -735,15 +751,32 @@ object MarqueeHook : BaseHook() {
         private var state = 0
         private var currentText = ""
         private var completedLoops = 0
+        private var pauseScheduled = false
+        private var drawTreeRef = WeakReference<ViewTreeObserver>(null)
+        private var generation = 0L
 
-        fun start() {
+        fun start(textWidth: Float) {
             val view = viewRef.get() ?: return
+            measuredTextWidth = textWidth
+            edgeShadeRef = if (usesTimerTextEffect) findEdgeShade(view)?.let(::WeakReference) else null
             val textNow = normalizeText(view.text.toString())
+            if (isRunning && currentText == textNow) {
+                if (!readiness.waiting) registerScrollingView(view)
+                return
+            }
             registerScrollingView(view)
-            if (isRunning && currentText == textNow) return
             currentText = textNow
+            generation++
             isRunning = true
+            pauseScheduled = false
+            removeDrawListener()
+            readiness.start()
+            distanceScrolled = 0f
             currentScrollX = 0f
+            if (updateScrollRange(view)) {
+                currentScrollX = scrollRange.start
+                view.scrollTo(currentScrollX.roundToInt(), 0)
+            }
             state = 0
             completedLoops = 0
             startTimeNanos = 0
@@ -752,27 +785,169 @@ object MarqueeHook : BaseHook() {
         }
 
         fun stop() {
+            generation++
             isRunning = false
+            pauseScheduled = false
+            edgeShadeRef = null
+            readiness.stop()
             choreographer.removeFrameCallback(this)
-            viewRef.get()?.scrollTo(0, 0)
+            removeDrawListener()
+            viewRef.get()?.let { view ->
+                view.scrollTo(0, 0)
+            }
         }
 
-        private fun getRealMaxScroll(): Float {
-            val view = viewRef.get() ?: return 0f
-            val textWidth = view.paint.measureText(currentText)
-            var visibleW = if (view.width > 0) view.width else Int.MAX_VALUE
-            var p = view.parent
-            while (p is ViewGroup) {
-                if (p.width > 0 && p.width < visibleW) visibleW = p.width
-                p = p.parent
+        private fun removeDrawListener() {
+            drawTreeRef.get()?.takeIf { it.isAlive }?.removeOnPreDrawListener(this)
+            drawTreeRef.clear()
+        }
+
+        private fun observeDraw(view: TextView) {
+            val tree = view.viewTreeObserver
+            if (drawTreeRef.get() === tree) return
+            removeDrawListener()
+            if (tree.isAlive) {
+                tree.addOnPreDrawListener(this)
+                drawTreeRef = WeakReference(tree)
             }
-            if (visibleW == Int.MAX_VALUE) visibleW = 0
-            val availableW = visibleW - view.paddingLeft - view.paddingRight
-            return kotlin.math.max(0f, textWidth - availableW.toFloat())
+        }
+
+        private fun schedulePause(view: TextView, durationMs: Long) {
+            // Frame timestamps and nanoTime share the monotonic clock. Account for a
+            // late UI dispatch: the relative wake must retain the original deadline.
+            val remainingNanos = durationMs * 1_000_000L - (System.nanoTime() - startTimeNanos)
+            val delayMillis = ((remainingNanos + 999_999L) / 1_000_000L).coerceAtLeast(0L)
+            pauseScheduled = true
+            // One delayed wake; native traversals may still update geometry or hide the view.
+            observeDraw(view)
+            choreographer.removeFrameCallback(this)
+            choreographer.postFrameCallbackDelayed(this, delayMillis)
+        }
+
+        private fun findEdgeShade(view: TextView): View? {
+            // The verified MIUI template puts this overlay next to the text
+            // container. Search only these two levels, never another module.
+            var parent = view.parent as? ViewGroup
+            repeat(2) {
+                val group = parent ?: return null
+                if (islandMarqueeState.containsKey(group)) return null
+                for (i in 0 until group.childCount) {
+                    val child = group.getChildAt(i)
+                    if (child.id != View.NO_ID && runCatching {
+                        child.resources.getResourceEntryName(child.id) == "island_text_shade"
+                    }.getOrDefault(false)) return child
+                }
+                parent = group.parent as? ViewGroup
+            }
+            return null
+        }
+
+        private fun awaitReadyDraw(view: TextView) {
+            pauseScheduled = false
+            choreographer.removeFrameCallback(this)
+            unregisterScrollingView(view)
+            // Native text scaling may make the whole line fit. Do not leave
+            // the old scroll offset clipping its first character while waiting.
+            view.scrollTo(0, 0)
+            readiness.awaitDraw()
+            observeDraw(view)
+        }
+
+        override fun onPreDraw(): Boolean {
+            val view = viewRef.get()
+            if (view == null) {
+                stop()
+                return true
+            }
+            if (!isRunning || !view.isAttachedToWindow || !isMarqueeEnabledFor(view)) {
+                stop()
+                return true
+            }
+            val ready = isVisibleForMarquee(view) && updateScrollRange(view)
+            if (pauseScheduled) {
+                if (!ready) {
+                    awaitReadyDraw(view)
+                } else {
+                    // Keep the same endpoint while native width/scale changes during a pause.
+                    currentScrollX = if (state == 2) scrollRange.end else scrollRange.start
+                    view.scrollTo(currentScrollX.roundToInt(), 0)
+                }
+                return true
+            }
+            if (readiness.onDraw(true, true, ready)) {
+                removeDrawListener()
+                registerScrollingView(view)
+                distanceScrolled = 0f
+                currentScrollX = scrollRange.start
+                view.scrollTo(currentScrollX.roundToInt(), 0)
+                state = 0
+                startTimeNanos = 0L
+                choreographer.postFrameCallback(this)
+            }
+            return true
+        }
+
+        private fun isVisibleForMarquee(view: TextView): Boolean {
+            if (view.windowVisibility != View.VISIBLE) return false
+            var current: View? = view
+            // Visibility includes ancestors outside the island; geometry intentionally
+            // does not. A fake-view transition can hide an otherwise valid viewport.
+            while (current != null) {
+                if (current.visibility != View.VISIBLE || !(current.alpha > 0f)) return false
+                current = current.parent as? View
+            }
+            return true
+        }
+
+        private fun updateScrollRange(view: TextView): Boolean {
+            val layout = view.layout ?: return false
+            if (layout.lineCount == 0 || view.width <= 0) return false
+            viewport.reset(view.width, view.compoundPaddingLeft, view.compoundPaddingRight)
+            var child: View = view
+            var parent = child.parent
+            val shade = edgeShadeRef?.get()
+            while (parent is ViewGroup) {
+                if (parent.width <= 0) return false
+                if (!viewport.parent(child.left, parent.scrollX, parent.width,
+                    parent.paddingLeft, parent.paddingRight, parent.clipChildren, parent.clipToPadding,
+                    child.translationX, child.scaleX, child.pivotX)) return false
+                if (shade != null && shade.parent === parent && shade.visibility == View.VISIBLE &&
+                    shade.alpha > 0f && shade.width > 0 && shade.scaleX > 0f) {
+                    val shadeLeft = shade.left + shade.translationX + shade.pivotX * (1f - shade.scaleX) - parent.scrollX
+                    viewport.insetForEdgeShade(shadeLeft, shadeLeft + shade.width * shade.scaleX,
+                        parent.width, view.resources.displayMetrics.density)
+                }
+                // The outer island transition changes screen coordinates, not the
+                // local text viewport. Never feed its transient global clip back in.
+                if (islandMarqueeState.containsKey(parent)) break
+                child = parent
+                parent = child.parent
+            }
+            if (usesTimerTextEffect) {
+                // MIUI's replacement span draws the complete text, while Layout's
+                // line bounds can describe only its placeholder. Use the same full
+                // text Paint measurement that admitted this view to marquee.
+                val alignment = when (Gravity.getAbsoluteGravity(view.gravity, view.layoutDirection) and Gravity.HORIZONTAL_GRAVITY_MASK) {
+                    Gravity.RIGHT -> 1f
+                    Gravity.CENTER_HORIZONTAL -> 0.5f
+                    else -> 0f
+                }
+                return scrollRange.updateMeasured(measuredTextWidth, layout.width.toFloat(),
+                    view.compoundPaddingLeft.toFloat(), alignment,
+                    viewport.left, viewport.right, layout.getParagraphDirection(0) < 0)
+            }
+            return scrollRange.update(
+                view.compoundPaddingLeft + layout.getLineLeft(0),
+                view.compoundPaddingLeft + layout.getLineRight(0),
+                viewport.left, viewport.right, layout.getParagraphDirection(0) < 0,
+            )
         }
 
         override fun doFrame(frameTimeNanos: Long) {
             if (!isRunning) return
+            val frameGeneration = generation
+            pauseScheduled = false
+            removeDrawListener()
             val view = viewRef.get()
             if (view == null) {
                 stop()
@@ -789,45 +964,57 @@ object MarqueeHook : BaseHook() {
                 startTimeNanos = frameTimeNanos
                 lastFrameTimeNanos = frameTimeNanos
             }
-            val maxScroll = getRealMaxScroll()
-            if (maxScroll <= 0) {
-                unregisterScrollingView(view)
-                stop()
+            if (!isVisibleForMarquee(view) || !updateScrollRange(view)) {
+                // A native transition can temporarily hide the real view or replace
+                // its Layout. Resume on a real draw after layout, without a timer or
+                // continuously posting frames while invisible. Detach/stop removes it.
+                awaitReadyDraw(view)
                 return
             }
 
             val elapsedMs = (frameTimeNanos - startTimeNanos) / 1_000_000
             when (state) {
-                0 -> if (elapsedMs >= delayMs) {
-                    state = 1
-                    lastFrameTimeNanos = frameTimeNanos
+                0 -> {
+                    distanceScrolled = 0f
+                    if (elapsedMs >= delayMs) {
+                        state = 1
+                        lastFrameTimeNanos = frameTimeNanos
+                    }
                 }
                 1 -> {
-                    currentScrollX += speedPxPerSec * ((frameTimeNanos - lastFrameTimeNanos) / 1_000_000_000f)
-                    if (currentScrollX >= maxScroll) {
-                        currentScrollX = maxScroll
+                    distanceScrolled += speedPxPerSec * ((frameTimeNanos - lastFrameTimeNanos) / 1_000_000_000f)
+                    if (distanceScrolled >= scrollRange.distance) {
+                        distanceScrolled = scrollRange.distance
                         state = 2
                         startTimeNanos = frameTimeNanos
                     }
-                    view.scrollTo(currentScrollX.toInt(), 0)
                 }
                 2 -> if (elapsedMs > PAUSE_AT_END_MS) {
                     completedLoops += 1
                     onLoopCompleted(view, completedLoops)
+                    if (!isRunning || generation != frameGeneration) return
                     val island = findBigIslandView(view)
                     val session = island?.let { islandAutoHideSessions[it] }
                     if (session?.dismissed == true) {
                         stop()
                         return
                     }
-                    currentScrollX = 0f
-                    view.scrollTo(0, 0)
+                    distanceScrolled = 0f
                     state = 0
                     startTimeNanos = frameTimeNanos
                 }
             }
+            if (state == 2) distanceScrolled = scrollRange.distance
+            currentScrollX = scrollRange.position(distanceScrolled)
+            view.scrollTo(currentScrollX.roundToInt(), 0)
             lastFrameTimeNanos = frameTimeNanos
-            choreographer.postFrameCallback(this)
+            if (!isRunning || generation != frameGeneration) return
+            when (state) {
+                0 -> schedulePause(view, delayMs.toLong())
+                // Preserve the existing strictly-greater-than-1000ms end-pause condition.
+                2 -> schedulePause(view, PAUSE_AT_END_MS + 1L)
+                else -> choreographer.postFrameCallback(this)
+            }
         }
     }
 }
