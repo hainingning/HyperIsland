@@ -130,6 +130,7 @@ object IslandOuterGlowHook : BaseHook() {
         hookAvoidBurnInHelper(module, param.defaultClassLoader)
         hookShaderSource(module, param.defaultClassLoader)
         hookGlowGeometry(module, param.defaultClassLoader)
+        StableIslandGlowFadeHook.install(module, param.defaultClassLoader)
     }
 
     override fun onConfigChanged() {
@@ -147,6 +148,7 @@ object IslandOuterGlowHook : BaseHook() {
             hookAvoidBurnInHelper(module, cl)
             hookShaderSource(module, cl)
             hookGlowGeometry(module, cl)
+            StableIslandGlowFadeHook.install(module, cl)
         }
     }
 

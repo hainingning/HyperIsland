@@ -17,6 +17,38 @@
 
 ## 1. 关键类
 
+### 真实大岛返回时的光圈亮度过渡
+
+`StableIslandGlowFadeHook` 仅绑定真实 `DynamicIslandContentView.getBigIslandView()`，
+限定已核对的大岛返回/恢复路径，原生光效已启用并运行，且当前上下 effect View
+与 `LightBgShader.fgView/getView()` 身份一致。只修改这两个实例的 `transitionAlpha`，
+不修改内容、共享容器、原生 alpha、shader、配色、物理动画和临时岛。
+`transitionAlpha` 与原生 `alpha` 相乘，因此系统持续写普通 alpha 不会覆盖淡入因子。
+
+AnimationController.onStateChange(content) 中明确的 AppExpanded→BigIsland，以及
+原生 tempHiddenToBigIslandAnimation(content,false) 的临时隐藏恢复，可授予一次过渡许可。
+常驻岛可能一直处于 BigIsland，所以退出其他应用时不一定经过 AppExpanded。
+临时隐藏恢复须有本实例隐藏周期，横滑消耗旧周期，已有可见绘制不能再次降低光效；
+isShown 瞬时为真不等于已经绘制过，原生 Controller 可能在恢复方法之前就设置可见。
+原调用失败、嵌套事件抢先、状态或数据身份
+变化均取消许可。其他来源沿用原生效果。普通应用返回须成功进入下一次 AppExpanded 才开启
+下一周期；常驻岛恢复须观察新的原生临时隐藏周期。重复回调、init/startGlowEffect、
+单纯可见性变化和光效实例重建都不能自行重播。
+等待首个原生可见帧时不写透明度、不额外等全部动画结束；首帧直接保留 0.5 因子，
+随后 900ms smoothstep 单调提升到 1。任何路径都不因等待而清零。Delegate.onSwipe
+先释放本模块的光效属性再执行原生切岛，兼顾切换中的两个内容；不消耗无关应用的返回许可。
+首次可见前许可超过 2s，仅在下一个原生绘制帧取消；没有额外定时器或等待帧请求。
+只在 900ms 过渡期间请求下一帧。此因子不能让原生自身 alpha 为零或尚未创建的光效提前出现。
+
+已成功完成本轮渐强且已记录可见绘制、当前无原生事件提交时，后续自然 preDraw
+跳过重复的反射和祖先可见性遍历。未开始、取消或尚未确认显示的状态仍观察真实绘制；
+新原生隐藏周期、进入应用、切岛、重建及异常沿原取消流程退出快路，不改变下一轮准入条件。
+
+控制器、两个效果、状态/数据及 ViewTreeObserver 均不被全局强持有。已经开始后的实际隐藏
+事件终止本轮，恢复后不重播；detach 移除监听并清状态。效果实例重建释放旧绑定并保留原生强度。
+只在 transitionAlpha 仍等于本模块最后写入值时恢复；外部改写、反射不匹配或异常
+均放弃本轮控制，保留原生行为。开始/完成和准入原因日志均设进程内次数上限，不含通知内容。
+
 ### 常驻通知文字滚动
 
 `MarqueeHook` 对常驻通知默认仍不启用全局跑马灯。渠道明确选择 `marquee=on` 时，
