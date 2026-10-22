@@ -17,6 +17,13 @@ yarn docs:dev
 yarn docs:build
 ```
 
+宽度与滚动回归：`:app:testDebugUnitTest` 运行几何、策略和标题单元测试；
+`python tools/regression/run_config_regression.py` 与
+`python tools/regression/run_controller_regression.py` 编译真实配置读取代码和滚动控制器，
+使用内存偏好、JSON 与 UI 调度模型验证边界，任何失败以非零退出码返回。
+这两个本地脚本使用 `tmp/jdk21`、`tmp/gradle-home` 中已有的 Windows 构建依赖，
+结果写入 `tmp/width-marquee-regression`；模型不等于 Android 实机渲染验证。
+
 环境：JDK 21、Gradle 9.6.1、AGP 9.3.1、Kotlin 2.4.10、compileSdk/targetSdk 37、minSdk 33。版本号在 `android/gradle.properties` 的 `appVersionName` / `appVersionCode` 中维护。
 
 ## 架构
@@ -40,6 +47,8 @@ Xposed 使用 libxposed 新 API（`io.github.libxposed.api`），不是旧 Xpose
 2. 全局/默认配置使用独立 `pref_*` key；应用级/渠道级配置使用 `pref_app_config_<packageName>` JSON，分节为 `toast`、`notification`、`channels.enabled`、`channels.settings.<channelId>.<field>`。
 3. `XposedPrefsSyncApp` 监听变更，把所有 `pref_` 业务键同步到 LSPosed RemotePreferences，按 key hash 拆成 1 个 core + 32 个 shard，避免 Binder TransactionTooLarge。
 4. Hook 进程统一通过 `ConfigManager.getBoolean/getString/...("pref_xxx")` 读取。旧版独立 key 继续兼容。
+
+渠道宽度使用 `getChannelIslandWidth(packageName, channelId)` 显式读取，允许未加入通知白名单的原生岛使用独立宽度；其他渠道字段仍沿用现有解析规则。
 
 硬性规则：
 
