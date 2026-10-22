@@ -1061,4 +1061,10 @@
 
     <string name="notice_title">お知らせ</string>
     <string name="notice_confirm_countdown">確認（%1$d）</string>
+    <string name="island_width_app">アプリのデフォルトの島幅</string>
+    <string name="island_width_channel">島の最大幅</string>
+    <string name="island_width_follow_app">アプリに従う</string>
+    <string name="island_width_follow_global">全体設定に従う</string>
+    <string name="island_width_system">システムの幅を使用</string>
+    <string name="island_width_help">チャンネル設定はアプリ設定より優先されます。未設定の場合は上位の設定を継承し、システムの幅を選ぶと上位のカスタム値を無視します。</string>
 </resources>

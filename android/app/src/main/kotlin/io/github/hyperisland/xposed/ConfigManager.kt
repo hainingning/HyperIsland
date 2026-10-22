@@ -90,6 +90,21 @@ object ConfigManager {
         }
         catch (_: ClassCastException) { default }
 
+    /** Width also applies to native islands outside the notification whitelist. */
+    fun getChannelIslandWidth(packageName: String, channelId: String): String {
+        if (packageName.isEmpty() || channelId.isEmpty()) return "default"
+        val config = appConfigJson(packageName)
+        if (config != null) {
+            // An existing JSON config is authoritative, including an absent field.
+            return config.optJSONObject("channels")?.optJSONObject("settings")
+                ?.optJSONObject(channelId)?.opt("max_width")
+                ?.takeUnless { it == JSONObject.NULL }?.toString() ?: "default"
+        }
+        val key = "pref_channel_max_width_${packageName}_${channelId}"
+        return try { prefsForKey(key)?.getString(fk(key), "default") ?: "default" }
+        catch (_: ClassCastException) { "default" }
+    }
+
     /**
      * Flutter 的 int 在 Android SharedPreferences 中以 Long 存储，
      * 优先用 getLong 读取再转换，若类型不符再尝试 getInt。
@@ -155,12 +170,12 @@ object ConfigManager {
     private fun fk(key: String) = "$FLUTTER_KEY_PREFIX$key"
 
     private fun appConfigValue(key: String): Any? {
-        parseAppField(key, TOAST_FIELDS)?.let { field ->
+        parseAppField(key, SORTED_TOAST_FIELDS)?.let { field ->
             val config = appConfigJson(field.pkg) ?: return null
             return config.optJSONObject("toast")?.opt(field.name)?.takeUnless { it == JSONObject.NULL }
                 ?: AppConfigMissing
         }
-        parseAppField(key, NOTIFICATION_FIELDS)?.let { field ->
+        parseAppField(key, SORTED_NOTIFICATION_FIELDS)?.let { field ->
             val config = appConfigJson(field.pkg) ?: return null
             return config.optJSONObject("notification")?.opt(field.name)?.takeUnless { it == JSONObject.NULL }
                 ?: AppConfigMissing
@@ -202,15 +217,15 @@ object ConfigManager {
         }
     }
 
-    private fun parseAppField(key: String, fields: Map<String, String>): AppField? {
-        for ((prefix, name) in fields.entries.sortedByDescending { it.key.length }) {
+    private fun parseAppField(key: String, fields: List<Map.Entry<String, String>>): AppField? {
+        for ((prefix, name) in fields) {
             if (key.startsWith(prefix)) return AppField(key.removePrefix(prefix), name)
         }
         return null
     }
 
     private fun parseChannelField(key: String): ChannelField? {
-        for ((prefix, name) in CHANNEL_FIELDS.entries.sortedByDescending { it.key.length }) {
+        for ((prefix, name) in SORTED_CHANNEL_FIELDS) {
             if (!key.startsWith(prefix)) continue
             val rest = key.removePrefix(prefix)
             val pkg = appPackages().firstOrNull { rest == it || rest.startsWith("${it}_") }
@@ -316,6 +331,7 @@ object ConfigManager {
     )
 
     private val NOTIFICATION_FIELDS = linkedMapOf(
+        "pref_notification_max_width_" to "max_width",
         "pref_media_island_enabled_" to "enabled",
         "pref_media_island_normal_notification_" to "normal_notification",
         "pref_media_outer_glow_" to "outer_glow",
@@ -325,6 +341,7 @@ object ConfigManager {
     )
 
     private val CHANNEL_FIELDS = linkedMapOf(
+        "pref_channel_max_width_" to "max_width",
         "pref_channel_template_" to "template",
         "pref_channel_renderer_" to "renderer",
         "pref_channel_icon_" to "icon",
@@ -357,6 +374,11 @@ object ConfigManager {
         "pref_channel_filter_blacklist_keywords_" to "blacklist_keywords",
         "pref_channel_island_enabled_" to "island_enabled"
     )
+
+    // These schemas are immutable. Sort once, preserving longest-prefix matching.
+    private val SORTED_TOAST_FIELDS = TOAST_FIELDS.entries.sortedByDescending { it.key.length }
+    private val SORTED_NOTIFICATION_FIELDS = NOTIFICATION_FIELDS.entries.sortedByDescending { it.key.length }
+    private val SORTED_CHANNEL_FIELDS = CHANNEL_FIELDS.entries.sortedByDescending { it.key.length }
 
     private val CORE_PREF_KEYS = setOf(
         "pref_show_welcome",

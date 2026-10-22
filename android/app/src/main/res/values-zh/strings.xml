@@ -1219,4 +1219,10 @@
     <!-- 公告弹窗（服务端下发正文，客户端只负责展示与去重） -->
     <string name="notice_title">公告</string>
     <string name="notice_confirm_countdown">确认（%1$d）</string>
+    <string name="island_width_app">应用默认岛宽度</string>
+    <string name="island_width_channel">大岛最大宽度</string>
+    <string name="island_width_follow_app">跟随应用</string>
+    <string name="island_width_follow_global">跟随全局</string>
+    <string name="island_width_system">使用系统宽度</string>
+    <string name="island_width_help">渠道设置优先于应用设置。未单独设置时继承上一级；选择系统宽度可忽略上一级的自定义值。</string>
 </resources>

@@ -40,6 +40,7 @@ import io.github.hyperisland.compose.data.FlutterPrefsRepository
 import io.github.hyperisland.compose.data.InstalledApp
 import io.github.hyperisland.compose.data.NotificationChannelInfo
 import io.github.hyperisland.compose.data.NotificationChannelsRepository
+import io.github.hyperisland.compose.page.apps.channel.IslandWidthPreference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,6 +96,7 @@ internal fun NotificationChannelsPage(
         mutableStateOf(prefs.mediaNotificationSettings(app.packageName))
     }
     var loading by remember(app.packageName) { mutableStateOf(true) }
+    var appWidth by remember(app.packageName) { mutableStateOf(prefs.notificationMaxWidth(app.packageName)) }
     var rootErrorVisible by remember { mutableStateOf(false) }
     var refreshRevision by remember { mutableIntStateOf(0) }
 
@@ -133,6 +135,7 @@ internal fun NotificationChannelsPage(
             } else if (key == "pref_app_config_${app.packageName}") {
                 enabledChannelIds = prefs.enabledChannelIds(app.packageName)
                 mediaSettings = prefs.mediaNotificationSettings(app.packageName)
+                appWidth = prefs.notificationMaxWidth(app.packageName)
             }
         }
         onDispose(removeListener)
@@ -299,6 +302,16 @@ internal fun NotificationChannelsPage(
                                 insideMargin = CHANNEL_ITEM_MARGIN,
                                 onClick = onOpenMediaSettings,
                             )
+                        }
+                    }
+                }
+                item {
+                    Card {
+                        IslandWidthPreference(value = appWidth, appLevel = true) { value ->
+                            if (value != null) {
+                                prefs.setNotificationMaxWidth(app.packageName, value)
+                                appWidth = value
+                            }
                         }
                     }
                 }

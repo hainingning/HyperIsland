@@ -1,6 +1,8 @@
 package io.github.hyperisland.xposed.hook.SystemUI.geometry
 
 import android.content.res.Resources
+import android.os.Bundle
+import android.service.notification.StatusBarNotification
 import io.github.hyperisland.xposed.ConfigManager
 import io.github.hyperisland.xposed.hook.BaseHook
 import io.github.hyperisland.xposed.utils.HookUtils
@@ -25,7 +27,9 @@ object BigIslandMinWidthHook : BaseHook() {
 
     private var hookedLegacyCalculateMaxWidthWithSmall = false
     private var hookedModernCalculateMaxWidthWithSmall = false
-    private var hookedSetMaxWidth = false
+    private var hookedWidthGetter = false
+    private var hookedCalculation = false
+    private val calculationScope = IslandWidthScope()
     private val registrationLock = Any()
     private var dynamicClassLoaderCallbackRegistered = false
 
@@ -73,13 +77,81 @@ object BigIslandMinWidthHook : BaseHook() {
     private fun hookContentViewClasses(module: XposedModule, classLoader: ClassLoader) {
         synchronized(registrationLock) {
             hookBaseContentView(module, classLoader)
+            hookWidthCalculation(module, classLoader)
             hookModernMaxWidthWithSmall(module, classLoader)
+        }
+    }
+
+    private fun widthForView(view: Any?, access: IslandWidthAccess?): Int {
+        val global = ConfigManager.getInt(KEY_MAX_WIDTH, 0)
+        if (view == null) return global.coerceIn(0, 1000)
+        return runCatching {
+            val extras = if (access != null) access.extras(view) as? Bundle else {
+                val data = view.javaClass.getMethod("getCurrentIslandData").invoke(view)
+                    ?: return@runCatching global.coerceIn(0, 1000)
+                data.javaClass.getMethod("getExtras").invoke(data) as? Bundle
+            }
+            val sbn = extras?.getParcelable("miui.sbn", StatusBarNotification::class.java)
+                ?: return@runCatching global.coerceIn(0, 1000)
+            fun sourceExtra(key: String): String? = sbn.notification.extras.getString(key)
+                ?.trim()?.takeIf { it.isNotEmpty() } ?: extras.getString(key)
+            val source = IslandWidthPolicy.source(
+                sbn.packageName, sbn.notification.channelId,
+                sourceExtra("hyperisland_source_pkg"),
+                sourceExtra("hyperisland_source_channel"),
+                sourceExtra("hyperisland_channel_id"),
+            )
+            IslandWidthPolicy.resolve(
+                ConfigManager.getChannelIslandWidth(source.packageName, source.channelId),
+                ConfigManager.getString("pref_notification_max_width_${source.packageName}", "default"),
+                global,
+            )
+        }.getOrDefault(global.coerceIn(0, 1000))
+    }
+
+    private fun scopedWidthForView(view: Any?, access: IslandWidthAccess?): Int =
+        calculationScope.currentFor(view) ?: widthForView(view, access)
+
+    private fun hookWidthCalculation(module: XposedModule, classLoader: ClassLoader) {
+        if (hookedCalculation) return
+        try {
+            val base = classLoader.loadClass(BASE_CONTENT_VIEW_CLASS)
+            val clazz = classLoader.loadClass(
+                "miui.systemui.dynamicisland.window.content.DynamicIslandContentView",
+            )
+            val method = clazz.declaredMethods.firstOrNull {
+                it.name == "calculateBigIslandWidth" && it.parameterTypes.isEmpty()
+            } ?: return
+            val maxWidth = base.getDeclaredField("maxWidth").apply { isAccessible = true }
+            val access = runCatching { IslandWidthAccess(clazz) }.getOrNull()
+            module.hook(method).intercept { chain ->
+                val target = chain.thisObject ?: return@intercept chain.proceed()
+                // Each native calculation starts fresh; only its same-owner getters reuse it.
+                val width = widthForView(target, access)
+                val original = maxWidth.getFloat(target)
+                calculationScope.withWidth(width, target) {
+                    // Cover direct field reads as well as getters. Restore even on failure.
+                    // The system uses this result for both the real view and fake animation.
+                    try {
+                        if (width > 0) maxWidth.setFloat(target, dpToPx(width))
+                        chain.proceed()
+                    } finally {
+                        maxWidth.setFloat(target, original)
+                    }
+                }
+            }
+            hookedCalculation = true
+            log(module) { "hooked per-notification width calculation" }
+        } catch (_: ClassNotFoundException) {
+        } catch (e: Exception) {
+            logError(module, "failed to hook width calculation: ${e.message}")
         }
     }
 
     private fun hookBaseContentView(module: XposedModule, classLoader: ClassLoader) {
         try {
             val clazz = classLoader.loadClass(BASE_CONTENT_VIEW_CLASS)
+            val access = runCatching { IslandWidthAccess(clazz) }.getOrNull()
 
             // 旧版 SystemUI 将双岛宽度计算放在 BaseContentView 中。
             if (!hookedLegacyCalculateMaxWidthWithSmall) {
@@ -89,7 +161,7 @@ object BigIslandMinWidthHook : BaseHook() {
                 }
                 if (calculateMaxWidthWithSmallMethod != null) {
                     module.hook(calculateMaxWidthWithSmallMethod).intercept { chain ->
-                        val maxWidthDp = ConfigManager.getInt(KEY_MAX_WIDTH, 0)
+                        val maxWidthDp = scopedWidthForView(chain.thisObject, access)
                         if (maxWidthDp <= 0) {
                             return@intercept chain.proceed()
                         }
@@ -103,50 +175,15 @@ object BigIslandMinWidthHook : BaseHook() {
                 }
             }
 
-            // Hook setMaxWidth - 控制无小岛时的大岛最大宽度
-            if (!hookedSetMaxWidth) {
-                val setMaxWidthMethod = clazz.declaredMethods.firstOrNull {
-                    it.name == "setMaxWidth" && it.parameterTypes.size == 3 &&
-                        it.parameterTypes.all { type -> type == Float::class.javaPrimitiveType }
-                } ?: clazz.declaredMethods.firstOrNull {
-                    it.name == "setMaxWidth" &&
-                        it.parameterTypes.size == 1 &&
-                        it.parameterTypes[0] == Float::class.javaPrimitiveType
+            // Keep setMaxWidth's native baseline and its update side effects intact.
+            // Both real and fake views inherit this getter; no previous-app width is stored.
+            if (!hookedWidthGetter) {
+                val getter = clazz.getDeclaredMethod("getMaxWidth")
+                module.hook(getter).intercept { chain ->
+                    val width = scopedWidthForView(chain.thisObject, access)
+                    if (width > 0) dpToPx(width) else chain.proceed()
                 }
-                if (setMaxWidthMethod != null) {
-                    val maxWidthField = clazz.getDeclaredField("maxWidth").apply { isAccessible = true }
-                    val clockWidthField = if (setMaxWidthMethod.parameterTypes.size == 3) {
-                        clazz.getDeclaredField("clockWidth").apply { isAccessible = true }
-                    } else {
-                        null
-                    }
-                    val batteryWidthField = if (setMaxWidthMethod.parameterTypes.size == 3) {
-                        clazz.getDeclaredField("batteryWidth").apply { isAccessible = true }
-                    } else {
-                        null
-                    }
-                    module.hook(setMaxWidthMethod).intercept { chain ->
-                        val maxWidthDp = ConfigManager.getInt(KEY_MAX_WIDTH, 0)
-                        if (maxWidthDp <= 0) {
-                            return@intercept chain.proceed()
-                        }
-
-                        val maxWidthDpClamped = maxWidthDp.coerceIn(1, 1000)
-                        val target = chain.thisObject ?: return@intercept chain.proceed()
-                        val maxWidthPx = dpToPx(maxWidthDpClamped)
-                        maxWidthField.setFloat(target, maxWidthPx)
-
-                        if (clockWidthField != null && batteryWidthField != null) {
-                            val clockWidth = (chain.args.getOrNull(1) as? Number)?.toFloat() ?: -1f
-                            val batteryWidth = (chain.args.getOrNull(2) as? Number)?.toFloat() ?: -1f
-                            clockWidthField.setFloat(target, clockWidth)
-                            batteryWidthField.setFloat(target, batteryWidth)
-                        }
-                        return@intercept null
-                    }
-                    hookedSetMaxWidth = true
-                    log(module) { "hooked setMaxWidth(${setMaxWidthMethod.parameterTypes.size} args) on $BASE_CONTENT_VIEW_CLASS" }
-                }
+                hookedWidthGetter = true
             }
         } catch (_: ClassNotFoundException) {
         } catch (e: Exception) {
@@ -170,7 +207,7 @@ object BigIslandMinWidthHook : BaseHook() {
             val getSpace = paramsClass.getMethod("getSpace")
 
             module.hook(method).intercept { chain ->
-                val maxWidthDp = ConfigManager.getInt(KEY_MAX_WIDTH, 0)
+                val maxWidthDp = calculationScope.current() ?: 0
                 if (maxWidthDp <= 0) {
                     return@intercept chain.proceed()
                 }

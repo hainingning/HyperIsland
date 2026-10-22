@@ -283,6 +283,7 @@ internal object ConfigBackupService {
     )
 
     private val notificationFields = mapOf(
+        "max_width" to LegacyField("pref_notification_max_width_", "default"),
         "enabled" to LegacyField("pref_media_island_enabled_", true),
         "normal_notification" to LegacyField("pref_media_island_normal_notification_", false),
         "outer_glow" to LegacyField("pref_media_outer_glow_", "default"),
@@ -292,6 +293,7 @@ internal object ConfigBackupService {
     )
 
     private val channelFields = mapOf(
+        "max_width" to LegacyField("pref_channel_max_width_", "default"),
         "template" to LegacyField("pref_channel_template_", "notification_island"),
         "renderer" to LegacyField("pref_channel_renderer_", "image_text_with_buttons_4"),
         "icon" to LegacyField("pref_channel_icon_", "auto"),

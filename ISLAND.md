@@ -17,6 +17,11 @@
 
 ## 1. 关键类
 
+宽度反射方法在 Hook 注册时解析并复用，不缓存 View、通知数据或长期宽度结果。
+一次 calculateBigIslandWidth 的嵌套 getter 仅在内容身份相同时复用本轮宽度，owner 弱引用，
+finally 恢复外层/移除 ThreadLocal；不同内容和每次新计算均重新读配置。固定字段表在
+ConfigManager 初始化时预排序，保留最长前缀优先、JSON 权威性和实时配置读取行为。
+
 ### 焦点通知模板缓存生命周期
 
 `FocusTemplateCacheHook` 仅针对已核对的插件 `17.1.3.76.0` 补充 V3 缓存回收；
@@ -274,6 +279,12 @@ fakeExpandedView.addView(dynamicIslandData.fakeView)
 每个 fake 子 View 保存自己的系统原始 background。对应类型启用模糊时，`IslandBlurHook.applyTransitionBlur()` 在该子 View 上创建独立的 `BackgroundBlurDrawable`；关闭模糊或 View detach 时恢复原 background 并释放模糊资源。自定义图片由 `IslandBackgroundHook.createTransitionBackground()` 创建独立 Drawable 实例，避免多个 View 共享 bounds。
 
 ## 5. fake 层几何和圆角
+
+### 按应用与渠道限制大岛宽度
+
+`notification.max_width` 与 `channels.settings.<id>.max_width` 保存字符串 dp；`default`/缺省继承，`0` 明确使用系统计算，`1..1000` 为自定义上限。优先级为渠道、应用、原有全局上限。配置归入对应应用的通知预设，与 Toast 分开；批量渠道修改保留 null = 不修改的语义。
+
+17.1.3.76.0 插件中，真实 `DynamicIslandContentView.calculateBigIslandWidth()` 同步构造参数并计算动画和稳定态共同使用的几何结果；fake 层通过系统跟踪参数使用这些结果，不单独计算最大宽度。Width Hook 在这次同步计算内读取当前 `currentIslandData` 的 SBN/代理源应用与渠道，将宽度覆盖限制在当前计算中，finally 恢复系统 `maxWidth` 字段。双岛 helper 使用仅存数值的 ThreadLocal，嵌套调用恢复上层值，最外层结束即 remove。真实/fake 的基类 getter 同样按各自数据读取；不保留 View、SBN 或上一应用宽度，`setMaxWidth` 原生更新副作用保留。
 
 ### 5.1 连续几何更新
 

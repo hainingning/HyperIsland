@@ -1213,4 +1213,10 @@
     <!-- 公告弹窗（服务端下发正文，客户端只负责展示与去重） -->
     <string name="notice_title">Announcement</string>
     <string name="notice_confirm_countdown">Confirm (%1$d)</string>
+    <string name="island_width_app">Default island width for this app</string>
+    <string name="island_width_channel">Maximum island width</string>
+    <string name="island_width_follow_app">Follow app</string>
+    <string name="island_width_follow_global">Follow global</string>
+    <string name="island_width_system">Use system width</string>
+    <string name="island_width_help">Channel settings override app settings. Unset values inherit; system width ignores custom values from the parent.</string>
 </resources>

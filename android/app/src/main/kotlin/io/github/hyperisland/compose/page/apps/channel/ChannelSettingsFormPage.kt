@@ -312,6 +312,9 @@ internal fun ChannelSettingsFormPage(
                 Column {
                     SectionTitle(stringResource(R.string.appearance))
                     Card {
+                        IslandWidthPreference(value = state.maxWidth, batch = isBatch) {
+                            onStateChange(state.copy(maxWidth = it))
+                        }
                         FormDropdown(
                             title = stringResource(R.string.island_outer_glow),
                             value = state.islandOuterGlow,

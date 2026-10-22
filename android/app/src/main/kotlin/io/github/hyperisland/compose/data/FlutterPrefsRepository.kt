@@ -305,6 +305,20 @@ class FlutterPrefsRepository(context: Context) {
         }
     }
 
+    internal fun notificationMaxWidth(packageName: String): String = runCatching {
+        JSONObject(getString("pref_app_config_$packageName"))
+            .optJSONObject("notification")?.optString("max_width", OPTION_DEFAULT) ?: OPTION_DEFAULT
+    }.getOrDefault(OPTION_DEFAULT)
+
+    internal fun setNotificationMaxWidth(packageName: String, value: String) {
+        updateAppConfig(packageName) { root ->
+            val notification = root.optJSONObject("notification")
+                ?: JSONObject().also { root.put("notification", it) }
+            putIfNonDefault(notification, "max_width", value, OPTION_DEFAULT)
+            if (notification.length() == 0) root.remove("notification")
+        }
+    }
+
     internal fun mediaNotificationSettings(packageName: String): MediaNotificationSettings = runCatching {
         val notification = JSONObject(getString("pref_app_config_$packageName"))
             .optJSONObject("notification") ?: return@runCatching MediaNotificationSettings()
@@ -355,6 +369,7 @@ class FlutterPrefsRepository(context: Context) {
             firstFloat = channel.optString("first_float", OPTION_DEFAULT),
             enableFloat = channel.optString("enable_float", OPTION_DEFAULT),
             timeout = channel.optString("timeout", OPTION_DEFAULT),
+            maxWidth = channel.optString("max_width", OPTION_DEFAULT),
             marquee = channel.optString("marquee", OPTION_DEFAULT),
             marqueeAutoHide = channel.optString("marquee_auto_hide", OPTION_DEFAULT),
             restoreLockscreen = channel.optString("restore_lockscreen", OPTION_DEFAULT),
@@ -394,6 +409,7 @@ class FlutterPrefsRepository(context: Context) {
             putIfNonDefault(channel, "first_float", value.firstFloat, OPTION_DEFAULT)
             putIfNonDefault(channel, "enable_float", value.enableFloat, OPTION_DEFAULT)
             putIfNonDefault(channel, "timeout", value.timeout, OPTION_DEFAULT)
+            putIfNonDefault(channel, "max_width", value.maxWidth, OPTION_DEFAULT)
             putIfNonDefault(channel, "marquee", value.marquee, OPTION_DEFAULT)
             putIfNonDefault(channel, "marquee_auto_hide", value.marqueeAutoHide, OPTION_DEFAULT)
             putIfNonDefault(channel, "restore_lockscreen", value.restoreLockscreen, OPTION_DEFAULT)

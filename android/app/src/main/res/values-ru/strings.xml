@@ -1061,4 +1061,10 @@
 
     <string name="notice_title">Объявление</string>
     <string name="notice_confirm_countdown">Подтвердить (%1$d)</string>
+    <string name="island_width_app">Ширина острова для приложения</string>
+    <string name="island_width_channel">Максимальная ширина острова</string>
+    <string name="island_width_follow_app">Как в приложении</string>
+    <string name="island_width_follow_global">Общие настройки</string>
+    <string name="island_width_system">Системная ширина</string>
+    <string name="island_width_help">Настройки канала имеют приоритет над настройками приложения. Неуказанное значение наследуется; системная ширина отменяет пользовательские значения родительского уровня.</string>
 </resources>

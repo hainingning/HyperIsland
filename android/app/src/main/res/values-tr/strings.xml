@@ -1116,4 +1116,10 @@
 
     <string name="notice_title">Duyuru</string>
     <string name="notice_confirm_countdown">Onayla (%1$d)</string>
+    <string name="island_width_app">Uygulama için varsayılan ada genişliği</string>
+    <string name="island_width_channel">En büyük ada genişliği</string>
+    <string name="island_width_follow_app">Uygulamayı izle</string>
+    <string name="island_width_follow_global">Genel ayarı izle</string>
+    <string name="island_width_system">Sistem genişliği</string>
+    <string name="island_width_help">Kanal ayarları uygulama ayarlarından önceliklidir. Belirtilmeyen değerler üst düzeyden alınır; sistem genişliği üst düzey özel değerleri yok sayar.</string>
 </resources>
