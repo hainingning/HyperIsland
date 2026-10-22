@@ -17,6 +17,62 @@
 
 ## 1. 关键类
 
+### 焦点通知模板缓存生命周期
+
+`FocusTemplateCacheHook` 仅针对已核对的插件 `17.1.3.76.0` 补充 V3 缓存回收；
+版本或反射接口不匹配时保留原生行为。普通通知不建立 V3 追踪状态。
+`ActiveIslandDismissHook` 的 `removeByKey` 回退只表示隐藏岛，不能据此释放通知模板。
+以 `NotifCollection.tryRemoveNotification` 成功移除，或通知监听器非零 reason 的移除事件，
+作为候选入口；两条路径均须通知服务按 key 查询无活跃通知、`NotifCollection.getEntry(key)`
+确认缺失且代次匹配，才能结束通知代次。插件 NotificationProvider 会合成 reason=0 的回调，
+甚至令 collection 成功移除仍在 NMS 中的通知，因此 collection 移除也不能跳过服务查询。
+查询失败或返回 null 属于未知，不做清理；lifetime extender 仍保留条目时同样不清理。
+NMS 查询在单一后台线程批量执行（每批最多 64 个 key），主线程只检查 collection。
+核验请求最多 128 个，每请求最多暂挂 8 个纯完成回调。通过插件自己的
+`CancellableContinuationImpl` 保留父 Job 取消与 dispatcher，拒绝挂起失败恢复输入；
+核验失败、容量超限或 1000 ms 截止时恢复原流程。该时限只结束核验等待，不触发延时清理。
+新代次、旧请求超时和迟到结果均按票据身份隔离，防止旧完成回调在核验期间重新入集合。
+活跃票据和待清理 key 各限 1024，来源别名及每类工作别名各限 32768；
+达到上限时停止新增追踪和清理，恢复等待项，保留已知旧票据的失效拦截，避免旧任务复活。
+
+工厂 writer 只在进入/退出时更新短元数据锁，布局 inflate、原生 Hook 和 Binder 均在锁外。
+整个工厂没有同步 writer 时才逐 key 摘下 `builderMap`、`builderTinyMap`、
+`builderDecoMap`、`builderDecoLandMap`、`templateMap`；工厂忙时由 writer 退出通知重试。
+先快照旧 builder 的 adapter/holder 身份，再摘表并登记退场；登记或派发失败恢复原表项。
+只摘表不足以释放全局 `AutoDensityControllerImpl.listeners` 和 AOD listener 对 holder 的引用。
+旧 view 与 rootView 均脱离窗口后，下一轮主队列才调用 holder 原生多态 `onDetach`；
+仍 attached 的视图由弱引用监听真实退场，短暂换父容器不会提前清理。退休 adapter 的迟到
+bind/update 叶子任务被拦截，原生 remove/onDetach 始终执行。完成后只摘除对应旧 holder 身份。
+holder 与 adapter 弱记录分别限 8192 和 4096；无法完整登记时保留原缓存。
+
+模板的 holder 表允许保留值为 null 的模块槽位，快照跳过这些空槽，只对非空对象检查类型与
+onDetach 声明；仍校验槽位键，不能因容忍空槽而接受未知对象。四类 holder 表都没有非空对象时，
+可释放退休 adapter 的弱追踪，不以 Map.isEmpty 判断。
+清理快照、摘表/登记或 collection 查询暂时失败时保留待办，按 250/1000/4000 ms 最多重试三次；
+这只是失败重试节奏，不以时间授权删除。每次均重查已结束代次、新通知否决及 collection 缺失，
+并在 writer 锁内再次校验代次。writer 忙只等待退出通知，不耗重试次数，不轮询。
+多个工厂中任一失败不能被其他成功掩盖；没有就绪工厂不算清理成功。队列共用一个延迟回调。
+重试耗尽后保留有界的失败票据，不再自动重试；同 key 新通知使旧待办失效，重复移除事件不重置预算。
+已经完成原生 onDetach 后的槽位/数据表操作可独立有限次重试；部分失败的原生 onDetach 不自动重复，
+保留后续原生清理机会。主线程拒绝投递检查不能标记 holder 已完成。
+清理错误按类别最多记录一次、不依赖调试开关；只记录阶段和异常类型，不记录通知 key/正文。
+
+回收队列通过 volatile 非空摘要跳过无待办的 writer 退出通知；一次有限扫描每片最多
+处理 4 个 key，holder/adapter 工作每片最多 8 项，另以约 2ms 为软预算，续片让出约 16ms。
+退避/BUSY 项在一次扫描中只访问一次，扫描结束后按真实事件或已有有限重试恢复；不以
+续片制造 BUSY 轮询。一个 key 的一致性快照/摘表事务及一次原生 onDetach 保持完整，
+不可中断，因此 2ms 不是单次原生调用的硬耗时上限。派发拒绝或异常保留回滚/后续恢复机会。
+
+禁止整体清空缓存、拆除仍 attached 的动画 View、调用 Bitmap.recycle 或删除可能仍被协程
+持有的 `keyLocks`。模板对象有结构相等语义及可变字段，任务映射必须使用弱身份键。
+构建可早于 NotifCollection 收录，不能把暂时缺失条目当作失效。四个创建叶子、错误重置和
+纯完成回调检查创建代次；包含 Mutex 和挂起点的构建协程始终执行原始状态机及 finally。
+
+实机验收须覆盖：直接移除通知、隐藏岛后移除（含跑马灯）、退出动画、同 key 重发、
+图片下载期间移除、通知生命周期延长、后台查询超时、父协程取消和新旧回调交错；
+确认配色/展开/通知中心显示正常，并在 GC 后
+比较失效模板、holder 和光效位图数量。源码测试和构建通过不替代长时间堆快照验证。
+
 | 用途 | 类 |
 | --- | --- |
 | 岛内容基类 | `miui.systemui.dynamicisland.window.content.DynamicIslandBaseContentView` |

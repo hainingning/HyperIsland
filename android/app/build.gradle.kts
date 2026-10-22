@@ -113,6 +113,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.navigationevent:navigationevent-android:1.1.2")
     implementation("org.jetbrains.compose.foundation:foundation-android:1.12.0")

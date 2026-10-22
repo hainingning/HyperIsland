@@ -31,6 +31,7 @@ import io.github.hyperisland.xposed.hook.FocusNotifStatusBarIconHook
 import io.github.hyperisland.xposed.hook.IslandMiniBarHook
 import io.github.hyperisland.xposed.hook.NotificationMiniBarHook
 import io.github.hyperisland.xposed.hook.FocusNotificationTextColorHook
+import io.github.hyperisland.xposed.hook.FocusTemplateCacheHook
 import io.github.hyperisland.xposed.hook.SystemUI.extensions.FaceUnlockStateHook
 import io.github.hyperisland.xposed.hook.SystemUI.lockscreen.LockscreenFaceUnlockUiHook
 import io.github.hyperisland.xposed.hook.SystemUI.extensions.KeyguardUnlockStateHook
@@ -86,6 +87,7 @@ class HyperIslandModule : XposedModule() {
                     LockscreenNegativePageHook.init(this, param)
                 }
                 IslandDispatcherHook.init(this, param)
+                FocusTemplateCacheHook.init(this, param)
                 GenericProgressHook.init(this, param)
                 ProxySourceHeadsUpSuppressHook.init(this, param)
                 ActiveIslandDismissHook.init(this, param)
